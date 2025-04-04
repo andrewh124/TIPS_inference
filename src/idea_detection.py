@@ -8,22 +8,27 @@ import spacy
 
 from src.utils import get_offsets, realign_embeddings, reshape_tensor
 
+
 class IdeaDetectionModel(nn.Module):
     def __init__(self, model_dir: str):
         super().__init__()
         self.encoder = BertModel.from_pretrained(model_dir)
-        self.pooler = torch.load(Path(model_dir, 'encoder.pt'))
-        self.label_projection_layer = torch.load(Path(model_dir, 'label_projection_layer_module.pt'))
-    
-    def forward(self, tokenizer_outputs: BatchEncoding, offsets: list[list[int]]) -> dict:
+        self.pooler = torch.load(Path(model_dir, "encoder.pt"))
+        self.label_projection_layer = torch.load(
+            Path(model_dir, "label_projection_layer_module.pt")
+        )
+
+    def forward(
+        self, tokenizer_outputs: BatchEncoding, offsets: list[list[int]]
+    ) -> torch.Tensor:
         model_outputs = self.encoder(**tokenizer_outputs)
         logits = realign_embeddings(model_outputs, offsets)
         logits = self.pooler(logits)
-        logits = self.label_projection_layer(logits[0])
-        
+        logits = self.apply_label_projection_layer(logits[0])
+
         return logits
-    
-    def label_projection_layer(self, inputs: torch.Tensor):
+
+    def apply_label_projection_layer(self, inputs: torch.Tensor) -> torch.Tensor:
         """
         Apply the label projection layer module and reshaping steps
 
@@ -62,45 +67,45 @@ class IdeaDetectionModel(nn.Module):
 class IdeaDetectionPipeline:
     def __init__(self, model_dir: str):
         self.transformer_tokenizer = AutoTokenizer.from_pretrained(model_dir)
-        self.spacy_tokenizer = spacy.load('en_core_web_sm')
+        self.spacy_tokenizer = spacy.load("en_core_web_sm")
         self.model = IdeaDetectionModel(model_dir)
         with open(Path(model_dir, "labels.json"), "r") as f:
             self.labels = json.load(f)
-    
+
     def get_prediction(self, text: str) -> dict:
         # allennlp tokenizer
-        text = ' '.join(text.split())
+        text = " ".join(text.split())
         spacy_tokenizer_output = self.spacy_tokenizer(text)
         spacy_tokens = [token.text for token in spacy_tokenizer_output]
-        input_text = ' '.join(spacy_tokens)
-        
+        input_text = " ".join(spacy_tokens)
+
         # huggingface tokenizer
-        transformer_tokenizer_output = self.transformer_tokenizer(input_text, add_special_tokens=True, max_length=512, return_tensors='pt')
+        transformer_tokenizer_output = self.transformer_tokenizer(
+            input_text, add_special_tokens=True, max_length=512, return_tensors="pt"
+        )
         offsets = get_offsets(input_text, transformer_tokenizer_output)
-        
+
         # forward
         logits = self.model(transformer_tokenizer_output, offsets)
-        
+
         # post processing
         label_probabilities = torch.sigmoid(logits).tolist()
         predicted_labels = self.map_logits_to_labels(logits)
-        
+
         return {
-            'logits': logits.tolist(),
-            'label_probabilities': label_probabilities,
-            'words': spacy_tokens,
-            'predicted_labels': predicted_labels
+            "logits": logits.tolist(),
+            "label_probabilities": label_probabilities,
+            "words": spacy_tokens,
+            "predicted_labels": predicted_labels,
         }
-    
-    def map_logits_to_labels(self, logits: torch.Tensor) -> dict[str, torch.Tensor]:
+
+    def map_logits_to_labels(self, logits: torch.Tensor) -> list[list[str]]:
         label_probabilities = torch.sigmoid(logits).cpu().data.numpy()
         argmax_indices = np.argwhere(label_probabilities > 0.5)
-        predicted_labels = [[] for word in range(label_probabilities.shape[0])]
-        
+        predicted_labels = [[] for word in range(label_probabilities.shape[1])]
+
         for word_index, label_index in argmax_indices:
             label = self.labels[str(label_index)]
             predicted_labels[word_index].append(label)
-        
+
         return predicted_labels
-        
-        
